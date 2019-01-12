@@ -9,7 +9,7 @@ import socket
 import struct
 import pygame
 
-DRIVE_SCALE = 20.0
+DRIVE_SCALE = 10.0
 TURN_SCALE = 6.0
 
 class RCCommand(struct.Struct):
