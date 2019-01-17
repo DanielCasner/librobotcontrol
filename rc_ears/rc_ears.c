@@ -612,7 +612,7 @@ int main()
       setpoint.gamma_dot = command.turn;
 
       for (i = 0; i < SERVO_CHANS; ++i) {
-        if (rc_servo_send_pulse_normalized(i, command.servos[i]) == -1) {
+        if (rc_servo_send_pulse_normalized(i+1, command.servos[i]) == -1) {
           return -1;
         }
       }
