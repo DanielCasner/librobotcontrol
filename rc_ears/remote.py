@@ -7,15 +7,25 @@ import time
 import csv
 import socket
 import struct
+import argparse
 import pygame
 
 DRIVE_SCALE = 10.0
+ANIM_DRIVE_SCALE = 40.0
 TURN_SCALE = 6.0
+ANIM_TURN_SCALE = 2.0
+SERVO_SCALES = (-1.25/90.0, 1.25/90.0, 0.0, 0.0)
+SERVO_OFFSETS = (0.0, 0.0, 0.0, 0.0)
 NUM_SERVOS = 4
+FRAME_TIME = 1.0/30.0
 
 # Disable warning about members defined outside init method, I don't know a cleaner way to do it and also have the
 # update method below.
 # pylint: disable=W0201
+# Disable review flags
+# pylint: disable=R
+
+
 class RCCommand(struct.Struct):
     "Remote control command packet."
 
@@ -25,6 +35,10 @@ class RCCommand(struct.Struct):
         "Create a command struct"
         super().__init__("8sddd4d")
         self.update(fwd, turn, servos, timestamp)
+
+    def __repr__(self):
+        "Debuggable represenation of command"
+        return "RCCommand({0.timestamp:0.3f}, {0.fwd:0.3f}, {0.turn:0.3f}, {0.servos!r})".format(self)
 
     def update(self, fwd, turn, servos, timestamp=time.time()):
         "Update the contents of the command"
@@ -38,41 +52,78 @@ class RCCommand(struct.Struct):
         return super().pack(self.COMMAND_MAGIC, self.timestamp, self.fwd, self.turn, *self.servos)
 
 
-class Animation():
-    "A container for a CSV file to use as an animation"
-
-    FRAME_TIME = 1.0/30.0
-
-    def __init__(self, csv_file, columns=("s0", "s1", "s2", "s4")):
-        "Reads the contents of a CSV file inteprets as columns"
-        reader = csv.reader(csv_file, delimiter=",")
-        self.frames = []
-        columns_indexes = {col: ind for col, ind in zip(columns)}
+def load_animation(csv_file, columns=("s0", "s1", "s2", "s4"), skip=0, trim=None, mirror=False, append_recenter=False):
+    "Reads the contents of a CSV file inteprets according to columns into an animation frame list"
+    reader = csv.reader(csv_file, delimiter="\t")
+    frames = []
+    columns_indexes = {col: ind for ind, col in enumerate(columns)}
+    def get_cmds(row):
+        "internal function to get the cmds"
+        if "fwd" in columns_indexes:
+            pos = float(row[columns_indexes['fwd']])
+            fwd = (pos - get_cmds.prev_pos) * ANIM_DRIVE_SCALE
+            get_cmds.prev_pos = pos
+        else:
+            fwd = 0.0
+        if "turn" in columns_indexes:
+            heading = float(row[columns_indexes['turn']])
+            turn = (heading - get_cmds.prev_heading) * ANIM_TURN_SCALE
+            if mirror:
+                turn *= -1.0
+            get_cmds.prev_heading = heading
+        else:
+            turn = 0.0
+        servos = [0.0] * NUM_SERVOS
+        for servo in range(NUM_SERVOS):
+            col_name = f"s{servo}"
+            if col_name in columns_indexes:
+                servos[servo] = float(row[columns_indexes[col_name]]) * SERVO_SCALES[servo] + SERVO_OFFSETS[servo]
+        return fwd, turn, servos
+    get_cmds.prev_pos = 0.0
+    get_cmds.prev_heading = 0.0
+    for row in reader:
+        if skip:
+            skip -= 1
+            continue
+        if trim and len(frames) >= trim:
+            continue
+        timestamp = len(frames) * FRAME_TIME
+        fwd, turn, servos = get_cmds(row)
+        frames.append(RCCommand(timestamp, fwd, turn, servos))
+    if append_recenter:
+        # Reread the file with the turn reversed and servos centered
+        reader = csv.reader(csv_file, delimiter="\t")
         for row in reader:
-            timestamp = len(self.frames) * self.FRAME_TIME
-            fwd = float(row[columns_indexes['fwd']]) if "fwd" in columns_indexes else 0.0
-            turn = float(row[columns_indexes['turn']]) if "turn" in columns_indexes else 0.0
-            servos = [0.0] * NUM_SERVOS
-            for servo in range(NUM_SERVOS):
-                col_name = f"s{servo}"
-                if col_name in columns_indexes:
-                    servos[servo] = float(row[columns_indexes[col_name]])
-            self.frames.append(RCCommand(timestamp, fwd, turn, servos))
+            timestamp = len(frames) * FRAME_TIME
+            _, turn, _ = get_cmds(row)
+            frames.append(RCCommand(timestamp, 0.0, turn * -1.0, SERVO_OFFSETS))
+    return frames
 
-    def start(self):
-        "Return a generator for frames"
-        for frame in self.frames:
-            yield frame
 
 # Pygame's members are all runtime defined so don't warn about them
 # pylint: disable=no-member
 class Remote():
     "Class container for remote control"
 
-    def __init__(self, host=("192.168.43.0", 5555)):
+    def __init__(self, host, animated_drive=False):
         "Sets up the remote with UDP connection to robot"
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.connect(host)
+        self.animated_drive = animated_drive
+        self._drive_target = 0.0
+        self._turn_target = 0.0
+        self.animation = []
+        self.animations = {
+            "r45": load_animation(open('45deg_turn_right_01.csv'), ("s0", "s1", "fwd", "turn"), mirror=False),
+            "l45": load_animation(open('45deg_turn_right_01.csv'), ("s0", "s1", "fwd", "turn"), mirror=True),
+            "forward_drive": load_animation(open('fwd_drive_01.csv'), ("s0", "s1", "fwd")),
+            "right": load_animation(open('45deg_turn_right_01.csv'), ("s0", "s1", "fwd", "turn"),
+                                    mirror=False, append_recenter=True),
+            "left": load_animation(open('45deg_turn_right_01.csv'), ("s0", "s1", "fwd", "turn"),
+                                   mirror=True, append_recenter=True),
+        }
+        self.turn_script = []
+
 
     def __del__(self):
         "Make sure we send a stop command before tearing down the socket"
@@ -82,32 +133,67 @@ class Remote():
         "Sends a command over the socket"
         self.sock.send(command.pack())
 
-    def handle_key(self, key):
+    @property
+    def drive_target(self):
+        "Driving target speed."
+        return self._drive_target
+    @drive_target.setter
+    def drive_target(self, speed):
+        self._drive_target = speed
+
+    @property
+    def turn_target(self):
+        "Turn target rate"
+        return self._turn_target
+    @turn_target.setter
+    def turn_target(self, rate):
+        self._turn_target = rate
+
+    def play_anim(self, name, clear_targets=True):
+        "Queue playing a given animation"
+        print("Animating", name)
+        if clear_targets:
+            self._drive_target = 0
+            self._turn_target = 0
+        self.animation = self.animations[name].copy()
+
+    def start_turn_script(self, list_name):
+        "Starts running a turn in place animation script"
+        self.turn_script = [turn.strip() for turn in open(list_name)]
+
+    def handle_key(self, event):
         "Handle pygame key events"
-        cmd = RCCommand()
-        if key[pygame.K_UP]: # up arrow
-            cmd.fwd = DRIVE_SCALE
-        if key[pygame.K_DOWN]: # down arrow
-            cmd.fwd = -DRIVE_SCALE
-        if key[pygame.K_LEFT]: # left arrow
-            cmd.turn = TURN_SCALE
-        if key[pygame.K_RIGHT]: # right arrow
-            cmd.turn = -TURN_SCALE
-        if key[pygame.K_1]:
-            cmd.servos[0] = -1.5
-        if key[pygame.K_2]:
-            cmd.servos[0] = -1.0
-        if key[pygame.K_3]:
-            cmd.servos[0] = -0.5
-        if key[pygame.K_4]:
-            cmd.servos[0] = 0.0
-        if key[pygame.K_5]:
-            cmd.servos[0] = 0.5
-        if key[pygame.K_6]:
-            cmd.servos[0] = 1.0
-        if key[pygame.K_7]:
-            cmd.servos[0] = 1.5
-        return cmd
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_UP: # up arrow
+                self.drive_target = DRIVE_SCALE
+            if event.key == pygame.K_DOWN: # down arrow
+                self.drive_target = -DRIVE_SCALE
+            if event.key == pygame.K_LEFT: # left arrow
+                self.turn_target = TURN_SCALE
+            if event.key == pygame.K_RIGHT: # right arrow
+                self.turn_target = -TURN_SCALE
+            if event.key == pygame.K_l:
+                self.play_anim("l45")
+            if event.key == pygame.K_r:
+                self.play_anim("r45")
+            if event.key == pygame.K_f:
+                self.play_anim("forward_drive")
+            if event.key == pygame.K_1:
+                self.start_turn_script("random_turns1.csv")
+            if event.key == pygame.K_2:
+                self.start_turn_script("random_turns2.csv")
+            if event.key == pygame.K_3:
+                self.start_turn_script("random_turns3.csv")
+            if event.key == pygame.K_SPACE:
+                self.turn_script = []
+                self.animation = []
+                self._drive_target = 0.0
+                self._turn_target = 0.0
+        elif event.type == pygame.KEYUP:
+            if event.key == pygame.K_UP or event.key == pygame.K_DOWN:
+                self.drive_target = 0
+            if event.key == pygame.K_LEFT or event.key == pygame.K_RIGHT:
+                self.turn_target = 0
 
     def run(self):
         """Container for remote "game" under pygame."""
@@ -121,16 +207,31 @@ class Remote():
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type in (pygame.KEYDOWN, pygame.KEYUP):
-                    key = pygame.key.get_pressed()
-                    if key[pygame.K_q]: # q
+                    if event.key == pygame.K_q: # q
                         running = False
                     else:
-                        cmd = self.handle_key(key)
-                        self.send(cmd)
+                        self.handle_key(event)
+                if self.animation:
+                    cmd = self.animation.pop(0)
+                    self.send(cmd)
+                elif self.turn_script:
+                    self.play_anim(self.turn_script.pop(0))
+                else:
+                    self.send(RCCommand(fwd=self.drive_target, turn=self.turn_target, servos=SERVO_OFFSETS))
                 pygame.display.flip()
-                time.sleep(Animation.FRAME_TIME)
+                time.sleep(FRAME_TIME)
             except KeyboardInterrupt:
                 running = False
 
+
+def main():
+    "Program entry point"
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-i', '--ip_address', default="192.168.43.0", help="Specify robot's ip address")
+    parser.add_argument('-p', '--port', default=5555, type=int, help="Manually specify robot's port")
+    parser.add_argument('-a', '--animated', action='store_true', help="Use animations for manual drive")
+    args = parser.parse_args()
+    Remote((args.ip_address, args.port), args.animated).run()
+
 if __name__ == '__main__':
-    Remote().run()
+    main()
