@@ -31,29 +31,30 @@ class RCCommand(struct.Struct):
 
     COMMAND_MAGIC = b"apleseed"
 
-    def __init__(self, timestamp=time.time(), fwd=0.0, turn=0.0, servos=(0.0,)*NUM_SERVOS):
+    def __init__(self, timestamp=time.time(), fwd=0.0, turn=0.0, servos=(0.0,)*NUM_SERVOS, flags=0x0):
         "Create a command struct"
-        super().__init__("8sddd4d")
-        self.update(fwd, turn, servos, timestamp)
+        super().__init__("8sddd4d4xI")
+        self.update(fwd, turn, servos, timestamp, flags)
 
     def __repr__(self):
         "Debuggable represenation of command"
         return "RCCommand({0.timestamp:0.3f}, {0.fwd:0.3f}, {0.turn:0.3f}, {0.servos!r})".format(self)
 
-    def update(self, fwd, turn, servos, timestamp=time.time()):
+    def update(self, fwd, turn, servos, timestamp=time.time(), flags=0x0):
         "Update the contents of the command"
         self.timestamp = timestamp
         self.fwd = fwd
         self.turn = turn
         self.servos = list(servos)
+        self.flags = flags
 
     def copy(self):
         "Return a new RCCommand which is a copy of this one"
-        return RCCommand(self.timestamp, self.fwd, self.turn, self.servos)
+        return RCCommand(self.timestamp, self.fwd, self.turn, self.servos, self.flags)
 
     def pack(self):
         "Returns binary representation of command"
-        return super().pack(self.COMMAND_MAGIC, self.timestamp, self.fwd, self.turn, *self.servos)
+        return super().pack(self.COMMAND_MAGIC, self.timestamp, self.fwd, self.turn, *self.servos, self.flags)
 
 
 def load_animation(csv_file, columns=("s0", "s1", "s2", "s4"), skip=0, trim=None, mirror=False, append_recenter=False):
@@ -130,15 +131,15 @@ class Remote():
             "forward_drive": load_animation(open('fwd_drive_01.csv'), ("s1", "s0", "fwd")),
             "forward_fast": load_animation(open('fwd_drive_05.csv'), ("s1", "s0", "fwd")),
             "backward_drive": load_animation(open('drvback_01.csv'), ("s1", "s0", "fwd")),
-            "right": load_animation(open('180deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
+            "right": load_animation(open('90deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
                                     mirror=False, append_recenter=False),
-            "left": load_animation(open('180deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
+            "left": load_animation(open('90deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
                                    mirror=True, append_recenter=False),
             "wiggle1": load_animation(open('earWiggle_01.csv'), ("s1", "s0", "fwd", "turn")),
             "wiggle2": load_animation(open('earWiggle_02.csv'), ("s1", "s0", "fwd", "turn")),
             "hurt1": load_animation(open('hurt_01.csv'), ("s1", "s0", "fwd", "turn")),
-            "proc_fwd_enter": load_animation(open('fwd_drive_05.csv'), ("s1", "s0", "fwd"), skip=0, trim=19),
-            "proc_fwd_loop": load_animation(open('fwd_drive_05.csv'), ("s1", "s0", "fwd"), skip=19, trim=55-19),
+            "proc_fwd_enter": load_animation(open('fwd_drive_05.csv'), ("s1", "s0", "fwd"), skip=0, trim=17),
+            "proc_fwd_loop": load_animation(open('fwd_drive_05.csv'), ("s1", "s0", "fwd"), skip=17, trim=55-17),
             "proc_fwd_exit": load_animation(open('fwd_drive_05.csv'), ("s1", "s0", "fwd"), skip=55, trim=None),
             "proc_back_enter": load_animation(open('drvback_01.csv'), ("s1", "s0", "fwd"), skip=0, trim=19),
             "proc_back_loop": load_animation(open('drvback_01.csv'), ("s1", "s0", "fwd"), skip=19, trim=42-19),
@@ -159,6 +160,7 @@ class Remote():
         self.proc_right_pos = self.animations["proc_right_exit"][0].servos
         self.proc_left_pos = self.animations["proc_left_exit"][0].servos
         self.turn_script = []
+        self.turn_script_last_dir = None
         self.sock.connect(host)
 
 
@@ -221,6 +223,8 @@ class Remote():
 
     def start_turn_script(self, list_name):
         "Starts running a turn in place animation script"
+        self.send(RCCommand(flags=0x01))
+        self.turn_script_last_dir = None
         self.turn_script = [turn.strip() for turn in open(list_name)]
 
     def handle_key(self, event):
@@ -260,6 +264,8 @@ class Remote():
                 self.start_turn_script("random_turns2.csv")
             if event.key == pygame.K_3:
                 self.start_turn_script("random_turns3.csv")
+            if event.key == pygame.K_0:
+                self.start_turn_script("random_turns0.csv")
             if event.key == pygame.K_SPACE:
                 self.turn_script = []
                 self.animation = []
@@ -298,8 +304,18 @@ class Remote():
                             cmd.servos = self.proc_right_pos
                     self.send(cmd)
                 elif self.turn_script:
-                    time.sleep(0.5)
-                    self.play_anim(self.turn_script.pop(0))
+                    #self.send(RCCommand(flags=0x02))
+                    if self.turn_script_last_dir:
+                        print("Returning to center")
+                        for i in range(15):
+                            self.send(RCCommand(turn=self.turn_script_last_dir * -1.0))
+                            time.sleep(FRAME_TIME)
+                    for i in range(30):
+                        self.send(RCCommand())
+                        time.sleep(FRAME_TIME)
+                    anim = self.turn_script.pop(0)
+                    self.turn_script_last_dir = TURN_SCALE if anim == "left" else -TURN_SCALE
+                    self.play_anim(anim)
                 elif self.animated_drive and (self.drive_target != 0.0 or self.turn_target != 0.0):
                     if self.drive_target > 0.0:
                         self.play_anim("proc_fwd_loop", False)

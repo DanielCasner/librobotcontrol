@@ -6,6 +6,7 @@
  */
 
 #include <stdio.h>
+#include <stdint.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <robotcontrol.h> // includes ALL Robot Control subsystems
@@ -26,6 +27,8 @@ typedef struct {
   double fwd;
   double turn;
   double servos[SERVO_CHANS];
+  uint32_t RESERVED;
+  uint32_t flags;
 } RCCommand;
 
 /**
@@ -63,6 +66,7 @@ typedef struct core_state_t {
   double d2_u;    ///< output of position controller D2 (theta_ref)
   double d3_u;    ///< output of steering controller D3 to motors
   double mot_drive; ///< u compensated for battery voltage
+  double gamma_bookmark; ///< Stored bookmark
 } core_state_t;
 
 // possible modes, user selected with command line arguments
@@ -608,8 +612,23 @@ int main()
         enter_pause();
       }
 
-      setpoint.phi_dot = command.fwd;
-      setpoint.gamma_dot = command.turn;
+      if (command.flags != 0) {
+        printf("flags = %08x\n", command.flags);
+      }
+
+      if (command.flags & 0x01) {
+        cstate.gamma_bookmark = cstate.gamma;
+        printf("Setting gamma bookmark = %f\n", cstate.gamma_bookmark);
+      }
+      else if (command.flags & 0x02) {
+        setpoint.gamma_dot = 0.0;
+        setpoint.gamma = cstate.gamma_bookmark;
+        printf("Recalling bookmark %f\n", setpoint.gamma);
+      }
+      else {
+        setpoint.phi_dot = command.fwd;
+        setpoint.gamma_dot = command.turn;
+      }
 
       for (i = 0; i < SERVO_CHANS; ++i) {
         if (rc_servo_send_pulse_normalized(i+1, command.servos[i]) == -1) {
