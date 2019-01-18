@@ -10,10 +10,10 @@ import struct
 import argparse
 import pygame
 
-DRIVE_SCALE = 10.0
-ANIM_DRIVE_SCALE = 40.0
+DRIVE_SCALE = 12.0
+ANIM_DRIVE_SCALE = 100.0
 TURN_SCALE = 6.0
-ANIM_TURN_SCALE = 2.0
+ANIM_TURN_SCALE = 1.0
 SERVO_SCALES = (-1.25/90.0, 1.25/90.0, 0.0, 0.0)
 SERVO_OFFSETS = (0.0, 0.0, 0.0, 0.0)
 NUM_SERVOS = 4
@@ -47,6 +47,10 @@ class RCCommand(struct.Struct):
         self.turn = turn
         self.servos = list(servos)
 
+    def copy(self):
+        "Return a new RCCommand which is a copy of this one"
+        return RCCommand(self.timestamp, self.fwd, self.turn, self.servos)
+
     def pack(self):
         "Returns binary representation of command"
         return super().pack(self.COMMAND_MAGIC, self.timestamp, self.fwd, self.turn, *self.servos)
@@ -57,6 +61,8 @@ def load_animation(csv_file, columns=("s0", "s1", "s2", "s4"), skip=0, trim=None
     reader = csv.reader(csv_file, delimiter="\t")
     frames = []
     columns_indexes = {col: ind for ind, col in enumerate(columns)}
+    if mirror and 's0' in columns_indexes and 's1' in columns_indexes:
+        columns_indexes['s0'], columns_indexes['s1'] = columns_indexes['s1'], columns_indexes['s0']
     def get_cmds(row):
         "internal function to get the cmds"
         if "fwd" in columns_indexes:
@@ -84,21 +90,27 @@ def load_animation(csv_file, columns=("s0", "s1", "s2", "s4"), skip=0, trim=None
     for row in reader:
         if skip:
             skip -= 1
+            get_cmds(row) # Skill need to process row to keep prev_pos and prev_heading correct
             continue
         if trim and len(frames) >= trim:
-            continue
+            break
         timestamp = len(frames) * FRAME_TIME
         fwd, turn, servos = get_cmds(row)
         frames.append(RCCommand(timestamp, fwd, turn, servos))
     if append_recenter:
+        print("ARC:", len(frames))
         # Reread the file with the turn reversed and servos centered
-        reader = csv.reader(csv_file, delimiter="\t")
+        csv_file.seek(0)
         for row in reader:
             timestamp = len(frames) * FRAME_TIME
             _, turn, _ = get_cmds(row)
-            frames.append(RCCommand(timestamp, 0.0, turn * -1.0, SERVO_OFFSETS))
+            if not mirror:
+                turn *= -1
+            frames.append(RCCommand(timestamp, 0.0, turn, SERVO_OFFSETS))
+        print(len(frames))
     return frames
 
+TURN_BREAK_IND = 14
 
 # Pygame's members are all runtime defined so don't warn about them
 # pylint: disable=no-member
@@ -108,21 +120,46 @@ class Remote():
     def __init__(self, host, animated_drive=False):
         "Sets up the remote with UDP connection to robot"
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.connect(host)
         self.animated_drive = animated_drive
         self._drive_target = 0.0
         self._turn_target = 0.0
         self.animation = []
         self.animations = {
-            "r45": load_animation(open('45deg_turn_right_01.csv'), ("s0", "s1", "fwd", "turn"), mirror=False),
-            "l45": load_animation(open('45deg_turn_right_01.csv'), ("s0", "s1", "fwd", "turn"), mirror=True),
-            "forward_drive": load_animation(open('fwd_drive_01.csv'), ("s0", "s1", "fwd")),
-            "right": load_animation(open('45deg_turn_right_01.csv'), ("s0", "s1", "fwd", "turn"),
-                                    mirror=False, append_recenter=True),
-            "left": load_animation(open('45deg_turn_right_01.csv'), ("s0", "s1", "fwd", "turn"),
-                                   mirror=True, append_recenter=True),
+            "r45": load_animation(open('45deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"), mirror=False),
+            "l45": load_animation(open('45deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"), mirror=True),
+            "forward_drive": load_animation(open('fwd_drive_01.csv'), ("s1", "s0", "fwd")),
+            "forward_fast": load_animation(open('fwd_drive_05.csv'), ("s1", "s0", "fwd")),
+            "backward_drive": load_animation(open('drvback_01.csv'), ("s1", "s0", "fwd")),
+            "right": load_animation(open('180deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
+                                    mirror=False, append_recenter=False),
+            "left": load_animation(open('180deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
+                                   mirror=True, append_recenter=False),
+            "wiggle1": load_animation(open('earWiggle_01.csv'), ("s1", "s0", "fwd", "turn")),
+            "wiggle2": load_animation(open('earWiggle_02.csv'), ("s1", "s0", "fwd", "turn")),
+            "hurt1": load_animation(open('hurt_01.csv'), ("s1", "s0", "fwd", "turn")),
+            "proc_fwd_enter": load_animation(open('fwd_drive_05.csv'), ("s1", "s0", "fwd"), skip=0, trim=19),
+            "proc_fwd_loop": load_animation(open('fwd_drive_05.csv'), ("s1", "s0", "fwd"), skip=19, trim=55-19),
+            "proc_fwd_exit": load_animation(open('fwd_drive_05.csv'), ("s1", "s0", "fwd"), skip=55, trim=None),
+            "proc_back_enter": load_animation(open('drvback_01.csv'), ("s1", "s0", "fwd"), skip=0, trim=19),
+            "proc_back_loop": load_animation(open('drvback_01.csv'), ("s1", "s0", "fwd"), skip=19, trim=42-19),
+            "proc_back_exit": load_animation(open('drvback_01.csv'), ("s1", "s0", "fwd"), skip=42, trim=None),
+            "proc_right_enter": load_animation(open('45deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
+                                               trim=TURN_BREAK_IND, mirror=False),
+            "proc_right_exit": load_animation(open('45deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
+                                              skip=TURN_BREAK_IND, mirror=False),
+            "proc_left_enter": load_animation(open('45deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
+                                              trim=TURN_BREAK_IND, mirror=True),
+            "proc_left_exit": load_animation(open('45deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
+                                             skip=TURN_BREAK_IND, mirror=True),
+            #"right": load_animation(open('45deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
+            #                        mirror=False, append_recenter=True),
+            #"left": load_animation(open('45deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
+            #                       mirror=True, append_recenter=True),
         }
+        self.proc_right_pos = self.animations["proc_right_exit"][0].servos
+        self.proc_left_pos = self.animations["proc_left_exit"][0].servos
         self.turn_script = []
+        self.sock.connect(host)
 
 
     def __del__(self):
@@ -139,6 +176,18 @@ class Remote():
         return self._drive_target
     @drive_target.setter
     def drive_target(self, speed):
+        if self.animated_drive:
+            if speed > 0.0:
+                if self._drive_target < speed:
+                    self.play_anim("proc_fwd_enter", False)
+            elif speed < 0.0:
+                if self._drive_target > speed:
+                    self.play_anim("proc_back_enter", False)
+            else: # Speed == 0
+                if self._drive_target > 0.0:
+                    self.play_anim("proc_fwd_exit", False)
+                elif self._drive_target < 0.0:
+                    self.play_anim("proc_back_exit", "False")
         self._drive_target = speed
 
     @property
@@ -147,6 +196,19 @@ class Remote():
         return self._turn_target
     @turn_target.setter
     def turn_target(self, rate):
+        if self.animated_drive:
+            if self.drive_target == 0.0:
+                if rate > 0.0:
+                    if self._turn_target < rate:
+                        self.play_anim("proc_left_enter", False)
+                elif rate < 0.0:
+                    if self._turn_target > rate:
+                        self.play_anim("proc_right_enter", False)
+                else: # rate == 0
+                    if self._turn_target > 0.0:
+                        self.play_anim("proc_left_exit", False)
+                    elif self._turn_target < 0.0:
+                        self.play_anim("proc_right_exit", False)
         self._turn_target = rate
 
     def play_anim(self, name, clear_targets=True):
@@ -176,8 +238,22 @@ class Remote():
                 self.play_anim("l45")
             if event.key == pygame.K_r:
                 self.play_anim("r45")
+            if event.key == pygame.K_k:
+                self.play_anim("left")
+            if event.key == pygame.K_t:
+                self.play_anim("right")
             if event.key == pygame.K_f:
                 self.play_anim("forward_drive")
+            if event.key == pygame.K_g:
+                self.play_anim("forward_fast")
+            if event.key == pygame.K_b:
+                self.play_anim("backward_drive")
+            if event.key == pygame.K_w:
+                self.play_anim("wiggle1")
+            if event.key == pygame.K_s:
+                self.play_anim("wiggle2")
+            if event.key == pygame.K_h:
+                self.play_anim("hurt1")
             if event.key == pygame.K_1:
                 self.start_turn_script("random_turns1.csv")
             if event.key == pygame.K_2:
@@ -191,9 +267,9 @@ class Remote():
                 self._turn_target = 0.0
         elif event.type == pygame.KEYUP:
             if event.key == pygame.K_UP or event.key == pygame.K_DOWN:
-                self.drive_target = 0
+                self.drive_target = 0.0
             if event.key == pygame.K_LEFT or event.key == pygame.K_RIGHT:
-                self.turn_target = 0
+                self.turn_target = 0.0
 
     def run(self):
         """Container for remote "game" under pygame."""
@@ -212,10 +288,28 @@ class Remote():
                     else:
                         self.handle_key(event)
                 if self.animation:
-                    cmd = self.animation.pop(0)
+                    cmd = self.animation.pop(0).copy()
+                    if self.animated_drive and self.drive_target != 0.0: # When animated driving forward or back
+                        if self.turn_target > 0.0:
+                            cmd.turn = self.turn_target
+                            cmd.servos = self.proc_left_pos
+                        elif self.turn_target < 0.0:
+                            cmd.turn = self.turn_target
+                            cmd.servos = self.proc_right_pos
                     self.send(cmd)
                 elif self.turn_script:
+                    time.sleep(0.5)
                     self.play_anim(self.turn_script.pop(0))
+                elif self.animated_drive and (self.drive_target != 0.0 or self.turn_target != 0.0):
+                    if self.drive_target > 0.0:
+                        self.play_anim("proc_fwd_loop", False)
+                    elif self.drive_target < 0.0:
+                        self.play_anim("proc_back_loop", False)
+                    else:
+                        self.send(RCCommand(fwd=self.drive_target,
+                                            turn=self.turn_target,
+                                            servos=self.proc_left_pos if self.turn_target > 0.0 else
+                                            self.proc_right_pos))
                 else:
                     self.send(RCCommand(fwd=self.drive_target, turn=self.turn_target, servos=SERVO_OFFSETS))
                 pygame.display.flip()
