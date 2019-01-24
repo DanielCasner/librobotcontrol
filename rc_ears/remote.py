@@ -10,7 +10,7 @@ import struct
 import argparse
 import pygame
 
-DRIVE_SCALE = 12.0
+DRIVE_SCALE = 16.0
 ANIM_DRIVE_SCALE = 100.0
 TURN_SCALE = 6.0
 ANIM_TURN_SCALE = 1.0
@@ -157,6 +157,10 @@ class Remote():
             #"left": load_animation(open('45deg_turn_right_01.csv'), ("s1", "s0", "fwd", "turn"),
             #                       mirror=True, append_recenter=True),
         }
+        for cmd in self.animations['proc_fwd_loop']: # Override speed target for forward cruise animation
+            cmd.fwd = DRIVE_SCALE
+        for cmd in self.animations['proc_back_loop']: # Override speed target for forward cruise animation
+            cmd.fwd = -DRIVE_SCALE
         self.proc_right_pos = self.animations["proc_right_exit"][0].servos
         self.proc_left_pos = self.animations["proc_left_exit"][0].servos
         self.turn_script = []
