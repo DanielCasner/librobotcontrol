@@ -306,14 +306,14 @@ class Remote():
                 elif self.turn_script:
                     #self.send(RCCommand(flags=0x02))
                     if self.turn_script_last_dir:
-                        print("Returning to center")
-                        for i in range(15):
+                        for _ in range(15):
                             self.send(RCCommand(turn=self.turn_script_last_dir * -1.0))
                             time.sleep(FRAME_TIME)
-                    for i in range(30):
+                    for _ in range(30):
                         self.send(RCCommand())
                         time.sleep(FRAME_TIME)
                     anim = self.turn_script.pop(0)
+                    print("Script remaining:", len(self.turn_script))
                     self.turn_script_last_dir = TURN_SCALE if anim == "left" else -TURN_SCALE
                     self.play_anim(anim)
                 elif self.animated_drive and (self.drive_target != 0.0 or self.turn_target != 0.0):
