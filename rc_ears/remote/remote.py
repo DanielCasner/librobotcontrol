@@ -22,8 +22,67 @@ FRAME_TIME = 1.0/30.0
 # Disable warning about members defined outside init method, I don't know a cleaner way to do it and also have the
 # update method below.
 # pylint: disable=W0201
+# pylint: disable=E1121
 # Disable review flags
 # pylint: disable=R
+
+class Button:
+    "A class for rendering pygame buttons"
+
+    def __init__(self, color, origin_x, origin_y, length, height, width, text, text_color):
+        "Initalize the button instance"
+        self.color = color
+        self.origin_x = origin_x
+        self.origin_y = origin_y
+        self.length = length
+        self.height = height
+        self.width = width
+        self.text = text
+        self.text_color = text_color
+        self.rect = pygame.Rect(origin_x, origin_y, length, height)
+
+    def _write_text(self, surface, text_color):
+        font_size = int(self.length//len(self.text))
+        my_font = pygame.font.SysFont("Calibri", font_size)
+        my_text = my_font.render(self.text, 1, text_color)
+        surface.blit(my_text, ((self.origin_x+self.length/2) - my_text.get_width()/2,
+                               (self.origin_y+self.height/2) - my_text.get_height()/2))
+        return surface
+
+    def _draw_button(self, surface, color):
+        "Render the button to serface"
+        for i in range(1, 10):
+            surface_i = pygame.Surface((self.length+(i*2), self.height+(i*2)))
+            surface_i.fill(color)
+            alpha = (255/(i+2))
+            if alpha <= 0:
+                alpha = 1
+            surface_i.set_alpha(alpha)
+            pygame.draw.rect(surface_i, color,
+                             (self.origin_x-i, self.origin_y-i, self.length+i, self.height+i), self.width)
+            surface.blit(surface_i, (self.origin_x-i, self.origin_y-i))
+        pygame.draw.rect(surface, color, (self.origin_x, self.origin_y, self.length, self.height), 0)
+        pygame.draw.rect(surface, (190, 190, 190), (self.origin_x, self.origin_y, self.length, self.height), 1)
+        return surface
+
+    def update_button(self, surface, color=None, text_color=None):
+        "Function to draw to rerender button each frame"
+        if color is None:
+            color = self.color
+        if text_color is None:
+            text_color = self.text_color
+        surface = self._draw_button(surface, color)
+        surface = self._write_text(surface, text_color)
+        return surface
+
+    def pressed(self, mouse):
+        "Check if a mouse click event was inside the button"
+        if mouse[0] > self.rect.topleft[0]:
+            if mouse[1] > self.rect.topleft[1]:
+                if mouse[0] < self.rect.bottomright[0]:
+                    if mouse[1] < self.rect.bottomright[1]:
+                        return True
+        return False
 
 
 class RCCommand(struct.Struct):
@@ -231,6 +290,13 @@ class Remote():
         self.turn_script_last_dir = None
         self.turn_script = [turn.strip() for turn in open(list_name)]
 
+    def stop_all(self):
+        "Stop all currently playing animations, scripts, etc."
+        self.turn_script = []
+        self.animation = []
+        self._drive_target = 0.0
+        self._turn_target = 0.0
+
     def handle_key(self, event):
         "Handle pygame key events"
         if event.type == pygame.KEYDOWN:
@@ -271,23 +337,39 @@ class Remote():
             if event.key == pygame.K_0:
                 self.start_turn_script("random_turns0.csv")
             if event.key == pygame.K_SPACE:
-                self.turn_script = []
-                self.animation = []
-                self._drive_target = 0.0
-                self._turn_target = 0.0
+                self.stop_all()
         elif event.type == pygame.KEYUP:
             if event.key == pygame.K_UP or event.key == pygame.K_DOWN:
                 self.drive_target = 0.0
             if event.key == pygame.K_LEFT or event.key == pygame.K_RIGHT:
                 self.turn_target = 0.0
 
+    def _make_buttons(self):
+        "Return a bunch of buttons to play different animations"
+        buttons = (("Wiggle", lambda: self.play_anim("wiggle1")),
+                   ("Excited", lambda: self.play_anim("wiggle2")),
+                   ("Hurt", lambda: self.play_anim("hurt1")),
+                   ("Stop all", self.stop_all)
+                  )
+        size = 200
+        widgets = []
+        for title, anim in buttons:
+            widgets.append((Button((100, 100, 100), 10, 10 + (size//2 + 10)*len(widgets), size, size//2, 0,
+                                   title, (255, 255, 255)), anim))
+        return widgets
+
+
     def run(self):
         """Container for remote "game" under pygame."""
-        screen_size = (120, 120)
+        pygame.init()
+        screen_size = (220, 480)
         screen = pygame.display.set_mode(screen_size)
-        screen.fill((0, 255, 0))
+        buttons = self._make_buttons()
         running = True
         while running:
+            screen.fill((0, 128, 255))
+            for button, _ in buttons:
+                button.update_button(screen)
             try:
                 event = pygame.event.poll()
                 if event.type == pygame.QUIT:
@@ -297,6 +379,11 @@ class Remote():
                         running = False
                     else:
                         self.handle_key(event)
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    mouse_pos = pygame.mouse.get_pos()
+                    for button, action in buttons:
+                        if button.pressed(mouse_pos):
+                            action()
                 if self.animation:
                     cmd = self.animation.pop(0).copy()
                     if self.animated_drive and self.drive_target != 0.0: # When animated driving forward or back
@@ -341,11 +428,10 @@ class Remote():
 def main():
     "Program entry point"
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--ip_address', default="192.168.43.0", help="Specify robot's ip address")
+    parser.add_argument('-i', '--ip_address', default="192.168.8.1", help="Specify robot's ip address")
     parser.add_argument('-p', '--port', default=5555, type=int, help="Manually specify robot's port")
-    parser.add_argument('-a', '--animated', action='store_true', help="Use animations for manual drive")
     args = parser.parse_args()
-    Remote((args.ip_address, args.port), args.animated).run()
+    Remote((args.ip_address, args.port), True).run()
 
 if __name__ == '__main__':
     main()
