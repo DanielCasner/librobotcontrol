@@ -8,7 +8,21 @@ import csv
 import socket
 import struct
 import argparse
-import pygame
+try:
+    import pygame
+except ImportError:
+    ANS = input("Could not import pygame library, attempt to install automatically? [Y/n]: ")
+    if not ANS or ANS.lower().startswith('y'):
+        from subprocess import call
+        if call(['pip3', 'install', 'pygame']) == 0:
+            import pygame
+        else:
+            exit("Could not automatically install pygame. You may need to try installing it manually with sudo.\n" \
+                 "e.g.:\tsudo pip3 install pygame")
+    else:
+        exit("Could not import pygame library, it needs to be installed to run this program.")
+
+
 
 DRIVE_SCALE = 16.0
 ANIM_DRIVE_SCALE = 100.0
